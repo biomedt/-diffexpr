@@ -1,0 +1,134 @@
+##如果没有安装这些包时运行
+install.packages('limma')
+install.packages('edgeR')
+install.packages('DESeq2')
+install.packages('ggplot2')
+
+##DE analysis
+diffexpr <- function(expr, ##matrix
+                     method, ##DESeq2,limma,wilcox
+                     N,##control group count
+                     M,##model group count
+                     p.adjust=TRUE,##use p.adj or pval for volcano
+                     log2FC.cutoff=1,##FC cut off
+                     size=15,##word size
+                     colors=c("#4DBBD5", "grey", "#E64B35"),##volcano colors
+                     width=5,
+                     height=5){
+  ##loading packages
+  library(limma)
+  library(edgeR)
+  library(DESeq2)
+  library(ggplot2)
+  
+  ##set group and colors
+  cols <- rainbow(ncol(expr)*1.2)
+  group_list <- factor(c(rep("N",N),rep("M",M)),levels = c("N","M"))
+  
+  ##integrate duplicated genes in average and remove rows conssitently have zero or very low counts
+  expr2 <- avereps(expr[,-c(1)],ID=expr[,1])
+  expr2 <- as.matrix(expr2)
+  expr2 <- DGEList(counts=expr2,group=group_list)
+  keep <- filterByExpr(expr2)
+  expr2 <- expr2[keep,keep.lib.sizes=FALSE]
+  count_dat <- expr2[["counts"]]
+  
+  ##diffexpr
+  if(method == 'DESeq2'){
+    colDate <- data.frame(row.names =colnames(count_dat),
+                          condition=group_list)
+    dds<-DESeqDataSetFromMatrix(countData = count_dat,
+                                colData = colDate,design = ~condition)
+    dds<-DESeq(dds)
+    res<-results(dds)
+    res<-as.data.frame(res)
+    res<-cbind(rownames(res),res) 
+    colnames(res)<- c('geng_id',"baseMean" ,"log2FoldChange","lfcSE" ,"stat","pvalue","padj" )
+    rld <- rlogTransformation(dds) 
+    count_norm=assay(rld)
+  } else if(method == 'limma'){
+    expr2 <- calcNormFactors(expr2)
+    count_norm <- cpm(expr2, log=TRUE, prior.count=3)
+    count_norm<-as.data.frame(count_norm)
+    
+    design <- model.matrix(~0+factor(group_list))
+    colnames(design) <- levels(factor(group_list))
+    rownames(design) <- colnames(count_norm)
+    contrast.matrix<-makeContrasts("M-N",levels = design)
+    
+    fit<-lmFit(count_norm,design)
+    fit2<-contrasts.fit(fit,contrast.matrix)
+    fit2<-eBayes(fit2)
+    options(digits = 4) 
+    res<-topTable(fit2,coef = 1,n=Inf)
+    res<-na.omit(res)
+    colnames(res)=c("log2FoldChange","AveExpr","t","pvalue","padj","B")
+    } else if (method == 'wilcox'){
+      expr2 <- calcNormFactors(expr2)
+      count_norm <- cpm(expr2, log=TRUE, prior.count=3)
+      count_norm<-as.data.frame(count_norm)
+      conditionsLevel<-levels(group_list)
+      pvalues <- sapply(1:nrow(count_norm),function(i){
+        data<-cbind.data.frame(gene=as.numeric(t(count_norm[i,])),group_list)
+        p=wilcox.test(gene~group_list, data)$p.value
+        return(p)
+      })
+      fdr=p.adjust(pvalues,method = "fdr")
+      
+      dataCon1=count_norm[,c(which(group_list==conditionsLevel[1]))]
+      dataCon2=count_norm[,c(which(group_list==conditionsLevel[2]))]
+      foldChanges=rowMeans(dataCon2)-rowMeans(dataCon1)
+      
+      res<-data.frame(log2FoldChange=foldChanges, pvalue=pvalues, padj=fdr)
+      rownames(res)=rownames(count_norm)
+      res=na.omit(res)
+    }
+  
+  ##batch effect
+  pdf(file = "batch.pdf",width,height)
+  par(mfrow=c(1,2),cex = 0.5)
+  boxplot(count_dat,boxwex=0.6, notch=T,cex=0.08,las=2,col=cols,main="count value")
+  boxplot(count_norm,boxwex=0.6, notch=T,cex=0.08,las=2,col=cols,main="Normalized value")
+  dev.off()
+  
+  ##add change into res and volcano plot
+  if(p.adjust==TRUE){
+    res$Change=ifelse(res$padj < 0.05 & abs(res$log2FoldChange) > log2FC.cutoff,
+                      ifelse(res$log2FoldChange > log2FC.cutoff, 'Up', 'Down'),'NOT')
+    yname='-log10(p.adjust)'
+    p1 <- ggplot(data = res, 
+                 aes(x = log2FoldChange, 
+                     y = -log10(padj),
+                     colour = Change,fill=Change))
+  } else {
+    res$Change=ifelse(res$pvalue < 0.05 & abs(res$log2FoldChange) > log2FC.cutoff,
+                      ifelse(res$log2FoldChange > log2FC.cutoff, 'Up', 'Down'),'NOT')
+    yname='-log10(p.value)'
+    p1 <- ggplot(data = res, 
+                 aes(x = log2FoldChange, 
+                     y = -log10(pvalue),
+                     colour = Change,fill=Change))
+  }
+  
+  p2 <- p1+geom_point(alpha = 0.5,size=5)+
+    scale_colour_manual(values =colors)+
+    xlab('log2(Fold change)')+ylab(yname)+
+    geom_hline(yintercept = -log10(0.05),lty=2,lwd=0.6,alpha=0.8)+
+    geom_vline(xintercept = c(log2FC.cutoff,-log2FC.cutoff),
+               lty=2,lwd=0.6,alpha=0.8)+
+    theme_bw()+theme(panel.border = element_blank(),
+                     axis.text = element_text(size = size, colour = "black"), 
+                     axis.title = element_text(size = size+2),
+                     axis.line = element_line(colour = "black"),
+                     legend.position = "none")
+  
+  ##output res
+  res$gene <- rownames(res)
+  output=list(count_dat=data.frame(count_dat),
+              count_norm=data.frame(count_norm),
+              result=res,
+              vol=p2)
+ 
+  return(output)
+  }
+  
