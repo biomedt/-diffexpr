@@ -1,12 +1,13 @@
-##如果没有安装这些包时运行
-install.packages('limma')
+##install packages
+BiocManager::install('limma')
 install.packages('edgeR')
 install.packages('DESeq2')
 install.packages('ggplot2')
+install.packages("VennDiagram")
 
 ##DE analysis
 diffexpr <- function(expr, ##matrix
-                     method, ##DESeq2,limma,wilcox
+                     method, ##DESeq2,limma,wilcox,edgeR
                      N,##control group count
                      M,##model group count
                      p.adjust=TRUE,##use p.adj or pval for volcano
@@ -82,6 +83,18 @@ diffexpr <- function(expr, ##matrix
       res<-data.frame(log2FoldChange=foldChanges, pvalue=pvalues, padj=fdr)
       rownames(res)=rownames(count_norm)
       res=na.omit(res)
+    } else if (method=='edgeR'){
+      expr2 <- calcNormFactors(expr2)
+      expr2 <- estimateCommonDisp(expr2)
+      expr2 <- estimateTagwiseDisp(expr2)
+      et <- exactTest(expr2,pair = c("N","M"))
+      topTags(et)
+      ordered_tags <- topTags(et, n=100000)
+      allDiff=ordered_tags$table
+      allDiff=allDiff[is.na(allDiff$FDR)==FALSE,]
+      res=allDiff
+      colnames(res)=c("log2FoldChange","logCPM","pvalue","padj")
+      count_norm=expr2$pseudo.counts
     }
   
   ##batch effect
@@ -130,5 +143,58 @@ diffexpr <- function(expr, ##matrix
               vol=p2)
  
   return(output)
-  }
-  
+}
+
+
+
+meth <- c('DESeq2','limma','wilcox','edgeR')
+all=list()
+DE_list=list()
+for (i in 1:length(meth)) {
+  output1 <- diffexpr(expr = rnaCount,N=5,M=5,method = meth[i],p.adjust=FALSE)
+  output1 <- output1[['result']]
+  output2 <- subset(output1,Change=='Up'|Change=='Down')
+  output2 <- output2[,c('gene','Change')]
+  output2 <- split(output1$gene,output1$Change)
+  DE_list[[meth[i]]] <- output2
+  all[[meth[i]]] <- output1 
+}  
+
+library(VennDiagram) 
+upreg <-list(DESeq2=DE_list[["DESeq2"]][["Up"]],
+             limma=DE_list[["limma"]][["Up"]],
+             Wilcox=DE_list[["wilcox"]][["Up"]],
+             edgeR=DE_list[["edgeR"]][["Up"]])
+downreg <-list(DESeq2=DE_list[["DESeq2"]][["Down"]],
+               limma=DE_list[["limma"]][["Down"]],
+               Wilcox=DE_list[["wilcox"]][["Down"]],
+               edgeR=DE_list[["edgeR"]][["Down"]])
+venn.diagram(
+  x = upreg,
+  fill = c("#3C5488B2","#00A087B2", 
+           "#F39B7FB2","#91D1C2B2"),
+  alpha = 0.50, cex = 1, 
+   cat.cex = 1, margin = 0,
+  filename = 'venn.tiff'
+)
+venn.diagram(
+  x = downreg,
+  fill = c("#3C5488B2","#00A087B2", 
+           "#F39B7FB2","#91D1C2B2"),
+  alpha = 0.50, cex = 1, 
+  cat.cex = 1, margin = 0,
+  filename = 'venn_downreg.tiff'
+)
+##提取下调交集基因
+inter_downreg <- get.venn.partitions(downreg)
+for (i in 1:nrow(inter_downreg)) inter_downreg[i,'values'] <- paste(inter_downreg[[i,'..values..']], collapse = '|')
+inter_downreg <- subset(inter_downreg, select = -..values.. )
+inter_downreg <- subset(inter_downreg, select = -..set.. )
+##提取上调交集基因
+inter_upreg <- get.venn.partitions(upreg)
+for (i in 1:nrow(inter_upreg)) inter_upreg[i,'values'] <- paste(inter_upreg[[i,'..values..']], collapse = '|')
+inter_upreg <- subset(inter_upreg, select = -..values.. )
+inter_upreg <- subset(inter_upreg, select = -..set.. )
+##保存到默认途径
+write.csv(inter_upreg,file='inter_upreg.csv')
+write.csv(inter_downreg,file='inter_downreg.csv')
